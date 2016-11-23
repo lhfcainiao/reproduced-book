@@ -1,0 +1,259 @@
+原文链接：https://laravel-china.org/topics/3142
+
+转载说明：原文写的非常详细，步骤清晰，可操作性强，完全可以参考原文记录的步骤进行实际操作。本人目前尚未使用xhprof进行性能分析，先记录转载，
+等实际使用后再补上遇到的坑和解决方法。
+
+原文内容：
+对于本地开发环境来说，进行性能分析xdebug是够用了，但如果是线上环境的话，xdebug消耗较大，配置也不够灵活，因此线上环境建议使用xhprof进行PHP性能追踪
+及分析。
+
+我们今天就简单介绍一下xhprof的简单安装与使用
+
+xhprof的安装#
+
+下载xhprof，我们这里选择的是通过git clone的方式，当然你也可以从 http://pecl.php.net/package/xhprof 这里下载。
+
+cd /usr/local/src
+git clone https://github.com/phacility/xhprof.git
+注意：
+php5.4及以上版本不能在pecl中下载，不支持。需要在github上下载hhttps://github.com/phacility/xhprof.git。
+另外xhprof已经很久没有更新过了，截至目前还不支持php7，php7可以试使用https://github.com/tideways/php-profiler-extension。
+安装xhporof
+
+cd xhprof/extension
+/usr/local/php5.6/bin/phpize
+./configure --with-php-config=/usr/local/php5.6/bin/php-config --enable-xhprof
+make
+make install
+最后如果出现类似的提示信息，就表示编译安装成功
+
+stalling shared extensions:     /usr/local/php-5.6.14/lib/php/extensions/no-debug-non-zts-20131226/
+修改配置文件/etc/php5.6.ini，在最后增加如下配置
+
+[xhprof]
+extension=xhprof.so
+xhprof.output_dir=/data/www/xhprof/output
+重启php-fpm后通过phpinfo查看，或者在命令行通过php -m | grep xhprof查看是否安装成功。
+
+注意：
+需要创建output_dir
+mkdir -p /data/www/xhprof/output
+xhprof的简单用法#
+
+将下载的xhprof复制到webroot目录，我这里以/data/www/project-xhprof为例
+
+mkdir /data/www/project-xhprof
+cp -R /usr/local/src/xhprof/* /data/www/project-xhprof/
+cd /data/www/project-xhprof
+在nginx中增加站点配置
+
+server {
+        listen  80;
+        server_name xhprof.dev;
+        root /data/www/project-xhprof;
+        index index.php index.html;
+        access_log /var/log/nginx/xhprof.dev.log main;
+        error_log /var/log/nginx/xhprof.dev.log.err debug;
+        rewrite_log on;
+
+        location ~* \.php$ {
+                include fastcgi_params;
+                fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                fastcgi_pass  unix:/var/run/php5.6-fpm.sock;
+                fastcgi_index index.php;
+
+        }
+}
+重启nginx，然后使用http://xhprof.dev/examples/sample.php,可以看到一些输出，并且提示通过访问http:///index.php?run=XXX&source=xhprof_foo
+查看结果。接下来访问 http://xhprof.dev/xhprof_html/ 就可以看到已经保存的结果，列出了所有函数的调用以及所消耗的时间。
+
+分析一下示例代码sample.php，关健代码：
+
+<?php
+// 开始分析
+xhprof_enable();
+
+// 运行一些函数
+foo();
+
+// 停止分析，得到分析数据
+$xhprof_data = xhprof_disable();
+$xhprof_data中记录了程序运行过程中所有的函数调用时间及CPU内存消耗，具体记录哪些指标可以通过xhprof_enable的参数控制，目前支持的参数有：
+
+HPROF_FLAGS_NO_BUILTINS 跳过所有内置（内部）函数。
+XHPROF_FLAGS_CPU 输出的性能数据中添加 CPU 数据。
+XHPROF_FLAGS_MEMORY 输出的性能数据中添加内存数据。
+之后的处理已经与xhprof扩展无关，大致是编写一个存储类XHProfRuns_Default，将$xhprof_data序列化并保存到某个目录，可以通过
+XHProfRuns_Default(__DIR__)将结果输出到当前目录，如果不指定则会读取php.ini配置文件中的xhprof.output_dir，仍然没有指定则会输出到/tmp。
+
+xhprof_html/index.php将记录的结果整理并可视化，默认的UI里列出了：
+
+funciton name ： 函数名
+calls: 调用次数
+Incl. Wall Time (microsec)： 函数运行时间（包括子函数）
+IWall%：函数运行时间（包括子函数）占比
+Excl. Wall Time(microsec)：函数运行时间（不包括子函数）
+EWall%：函数运行时间（不包括子函数）
+在xhprof_html/index.php中还可以看到[View Full Callgraph]链接，点击后可以绘制出一张可视化的性能分析图，如果点击后报错的话，
+可能是缺少依赖graphviz，graphviz是一个绘制图形的工具，可以更为直观的让你查看性能的瓶颈。
+
+wget http://www.graphviz.org/pub/graphviz/stable/SOURCES/graphviz-2.24.0.tar.gz
+cd graphviz-2.24.0
+./configure
+make && make install
+或者直接使用yum安装
+
+yum install -y libpng
+yum install -y graphviz
+这时候就可以看到类似下面的效果
+
+
+优雅的接入现有项目#
+
+通过上面的这些介绍，我们其实就已经可以将xhprof整合到任何我们已有的项目中，目前大部份的MVC框架都有唯一的入口文件，只需要在入口文件的开始处注入
+xhprof的代码：
+
+<?php
+//开启xhprof
+xhprof_enable(XHPROF_FLAGS_MEMORY | XHPROF_FLAGS_CPU);
+
+//在程序结束后收集数据
+register_shutdown_function(function() {
+    $xhprof_data        = xhprof_disable();
+
+    //让数据收集程序在后台运行
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+
+    //保存xhprof数据
+    ...
+});
+我们不可能在我们需要分析的所有地方都加上，但是这样免不了要修改项目的源代码，其实php本身就提供了更好的注入方式，比如将上述逻辑保存为
+/data/www/xhprof/inject.php，然后修改php配置文件中的auto_prepend_file配置
+
+auto_prepend_file = /data/www/xhprof/inject.php
+对于 Apache 服务器，添加以下代码:
+
+php_admin_value auto_prepend_file "/data/www/xhprof/inject.php"
+对于 Nginx 服务器，在服务器配置中添加以下代码:
+
+fastcgi_param PHP_VALUE "auto_prepend_file=/data/www/xhprof/inject.php";
+这样所有的php请求文件都会自动注入/data/www/xhprof/inject.php这个文件，这样侵入性更小，并且可以实现基于站点的注入。
+
+更漂亮的数据展示xhgui#
+
+注入代码后我们还需要实现保存xhprof数据以及展示数据的UI，现有的两个比较流行的两个轮子是 xhprof.io 和 xhgui 两个项目都差不多，但综合比较起来
+xhprof.io年久失修，xhgui还比较活跃，UI界面也相对比较美观，我这里就选择xhgui进行数据展示了。
+
+安装xhgui
+
+从github中clone代码至站点目录/data/www/project-xhgui
+mkdir /data/www/project-xhgui
+cd /data/www/project-xhgui
+# 我自己汉化的版本
+git clone https://github.com/maxincai/xhgui.git ./
+# 你可以clone原版
+git clone https://github.com/perftools/xhgui.git ./
+设置缓存目录的权限,允许nginx创建文件
+
+chmod -R 777
+启动mongodb实例，如果mongodb如没有使用默认的端口和配置，或者有使用安全验证，刚需要修改config/config.php中的相关配置，我们这里使用的是默认配置，
+就不作修改了。
+
+为提高 MongoDB 的性能，你可以运行以下指令以添加索引：
+$ /usr/local/mongodb/bin/mongo
+> use xhprof
+db.results.ensureIndex( { 'meta.SERVER.REQUEST_TIME' : -1 } )  
+db.results.ensureIndex( { 'profile.main().wt' : -1 } )  
+db.results.ensureIndex( { 'profile.main().mu' : -1 } )  
+db.results.ensureIndex( { 'profile.main().cpu' : -1 } )  
+db.results.ensureIndex( { 'meta.url' : 1 } )  
+安装mongodb的PHP扩展
+
+wget http://pecl.php.net/get/mongodb-1.1.9.tgz
+tar zxvf mongodb-1.1.9.tgz
+cd mongodb-1.1.9
+/usr/local/php5.6/bin/phpize
+./configure --with-php-config=/usr/local/php5.6/bin/php-config
+make && make install
+vim /etc/php5.6.ini
+# 在文件最后增加
+[mongo]
+extension=mongo.so
+# 查看是否安装成功
+php -m | grep mongo
+# 重启php-fpm
+/etc/init.d/php5.6-fpm restart
+运行XHGui的安装脚本。安装脚本将通过composer安装XHGui的相关依赖。
+
+php install.php
+# 如果上面的命令执行报错，则执行下面的命令
+composer install
+配置web服务器，我们这里以nginx为例
+
+server {
+    listen  80;
+    server_name xhgui.dev;
+    root /data/www/project-xhgui/webroot;
+    index index.php index.html;
+    access_log /var/log/nginx/xhgui.dev.log main;
+    error_log /var/log/nginx/xhgui.dev.log.err debug;
+    rewrite_log on;
+    location / {
+            try_files $uri $uri/ /index.php?$uri&$args;
+    }
+
+    location ~* \.php$ {
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_pass  unix:/var/run/php5.6-fpm.sock;
+            fastcgi_index index.php;
+
+    }
+}
+配置完成后重启nginx，这时候打开http://xhgui.dev/，就可以看到类似下面的页面
+
+
+修改/etc/php5.6.ini中的auto_prepend_file配置完成xhgui的接入
+
+auto_prepend_file = /data/www/project-xhgui/external/header.php
+xhgui的具体使用#
+
+最近运行#
+
+
+
+也可以按时间范围和请求的地址进行搜索
+
+
+可以按执行时间、CPU时间、内存占用进行排序
+
+
+可以点击一个地址进去看这个地址的最近趋势
+
+
+一次运行的详细#
+
+
+
+一个函数的运行详细#
+
+
+
+一次运行的函数调用图#
+
+
+
+一次运行的火焰图#
+
+
+
+对比多次请求#
+
+
+
+
+添加观察函数#
+
+
